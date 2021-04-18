@@ -1,20 +1,9 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.action.search;
@@ -262,6 +251,32 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
         return true;
     }
 
+    private boolean assertExecuteOnStartThread() {
+        // Ensure that the current code has the following stacktrace:
+        // AbstractSearchAsyncAction#start -> AbstractSearchAsyncAction#executePhase -> AbstractSearchAsyncAction#performPhaseOnShard
+        final StackTraceElement[] stackTraceElements = Thread.currentThread().getStackTrace();
+        assert stackTraceElements.length >= 6 : stackTraceElements;
+        int index = 0;
+        assert stackTraceElements[index++].getMethodName().equals("getStackTrace");
+        assert stackTraceElements[index++].getMethodName().equals("assertExecuteOnStartThread");
+        assert stackTraceElements[index++].getMethodName().equals("performPhaseOnShard");
+        if (stackTraceElements[index].getMethodName().equals("performPhaseOnShard")) {
+            assert stackTraceElements[index].getClassName().endsWith("CanMatchPreFilterSearchPhase");
+            index++;
+        }
+        assert stackTraceElements[index].getClassName().endsWith("AbstractSearchAsyncAction");
+        assert stackTraceElements[index++].getMethodName().equals("run");
+
+        assert stackTraceElements[index].getClassName().endsWith("AbstractSearchAsyncAction");
+        assert stackTraceElements[index++].getMethodName().equals("executePhase");
+
+        assert stackTraceElements[index].getClassName().endsWith("AbstractSearchAsyncAction");
+        assert stackTraceElements[index++].getMethodName().equals("start");
+
+        assert stackTraceElements[index].getClassName().endsWith("AbstractSearchAsyncAction") == false;
+        return true;
+    }
+
     protected void performPhaseOnShard(final int shardIndex, final SearchShardIterator shardIt, final SearchShardTarget shard) {
         /*
          * We capture the thread that this phase is starting on. When we are called back after executing the phase, we are either on the
@@ -271,9 +286,10 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
          * we can continue (cf. InitialSearchPhase#maybeFork).
          */
         if (shard == null) {
+            assert assertExecuteOnStartThread();
             SearchShardTarget unassignedShard = new SearchShardTarget(null, shardIt.shardId(),
                 shardIt.getClusterAlias(), shardIt.getOriginalIndices());
-            fork(() -> onShardFailure(shardIndex, unassignedShard, shardIt, new NoShardAvailableActionException(shardIt.shardId())));
+            onShardFailure(shardIndex, unassignedShard, shardIt, new NoShardAvailableActionException(shardIt.shardId()));
         } else {
             final PendingExecutions pendingExecutions = throttleConcurrentRequests ?
                 pendingExecutionsPerNode.computeIfAbsent(shard.getNodeId(), n -> new PendingExecutions(maxConcurrentRequestsPerNode))
@@ -730,18 +746,17 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
     protected abstract SearchPhase getNextPhase(SearchPhaseResults<Result> results, SearchPhaseContext context);
 
     private void executeNext(PendingExecutions pendingExecutions, Thread originalThread) {
-        executeNext(pendingExecutions == null ? null : pendingExecutions::finishAndRunNext, originalThread);
+        executeNext(pendingExecutions == null ? null : pendingExecutions.finishAndGetNext(), originalThread);
     }
 
     void executeNext(Runnable runnable, Thread originalThread) {
-        if (throttleConcurrentRequests) {
+        if (runnable != null) {
+            assert throttleConcurrentRequests;
             if (originalThread == Thread.currentThread()) {
                 fork(runnable);
             } else {
                 runnable.run();
             }
-        } else {
-            assert runnable == null;
         }
     }
 
@@ -755,12 +770,12 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
             this.permits = permits;
         }
 
-        void finishAndRunNext() {
+        Runnable finishAndGetNext() {
             synchronized (this) {
                 permitsTaken--;
                 assert permitsTaken >= 0 : "illegal taken permits: " + permitsTaken;
             }
-            tryRun(null);
+            return tryQueue(null);
         }
 
         void tryRun(Runnable runnable) {

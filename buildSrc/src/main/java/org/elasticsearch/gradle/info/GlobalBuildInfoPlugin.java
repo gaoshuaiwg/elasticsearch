@@ -1,20 +1,9 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 package org.elasticsearch.gradle.info;
 
@@ -28,12 +17,14 @@ import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 import org.gradle.api.logging.Logger;
 import org.gradle.api.logging.Logging;
+import org.gradle.api.provider.Provider;
 import org.gradle.api.provider.ProviderFactory;
 import org.gradle.internal.jvm.Jvm;
 import org.gradle.internal.jvm.inspection.JvmInstallationMetadata;
 import org.gradle.internal.jvm.inspection.JvmMetadataDetector;
+import org.gradle.internal.jvm.inspection.JvmVendor;
 import org.gradle.jvm.toolchain.internal.InstallationLocation;
-import org.gradle.jvm.toolchain.internal.SharedJavaInstallationRegistry;
+import org.gradle.jvm.toolchain.internal.JavaInstallationRegistry;
 import org.gradle.util.GradleVersion;
 
 import javax.inject.Inject;
@@ -67,13 +58,13 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
     private static final String DEFAULT_VERSION_JAVA_FILE_PATH = "server/src/main/java/org/elasticsearch/Version.java";
     private static Integer _defaultParallel = null;
 
-    private final SharedJavaInstallationRegistry javaInstallationRegistry;
+    private final JavaInstallationRegistry javaInstallationRegistry;
     private final JvmMetadataDetector metadataDetector;
     private final ProviderFactory providers;
 
     @Inject
     public GlobalBuildInfoPlugin(
-        SharedJavaInstallationRegistry javaInstallationRegistry,
+        JavaInstallationRegistry javaInstallationRegistry,
         JvmMetadataDetector metadataDetector,
         ProviderFactory providers
     ) {
@@ -107,8 +98,9 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
             params.reset();
             params.setRuntimeJavaHome(runtimeJavaHome);
             params.setRuntimeJavaVersion(determineJavaVersion("runtime java.home", runtimeJavaHome, minimumRuntimeVersion));
-            params.setIsRutimeJavaHomeSet(Jvm.current().getJavaHome().equals(runtimeJavaHome) == false);
-            params.setRuntimeJavaDetails(getJavaInstallation(runtimeJavaHome).getDisplayName());
+            params.setIsRuntimeJavaHomeSet(Jvm.current().getJavaHome().equals(runtimeJavaHome) == false);
+            JvmInstallationMetadata runtimeJdkMetaData = metadataDetector.getMetadata(getJavaInstallation(runtimeJavaHome).getLocation());
+            params.setRuntimeJavaDetails(formatJavaVendorDetails(runtimeJdkMetaData));
             params.setJavaVersions(getAvailableJavaVersions());
             params.setMinimumCompilerVersion(minimumCompilerVersion);
             params.setMinimumRuntimeVersion(minimumRuntimeVersion);
@@ -127,8 +119,16 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
             }
         });
 
+        // When building Elasticsearch, enforce the minimum compiler version
+        BuildParams.withInternalBuild(() -> assertMinimumCompilerVersion(minimumCompilerVersion));
+
         // Print global build info header just before task execution
         project.getGradle().getTaskGraph().whenReady(graph -> logGlobalBuildInfo());
+    }
+
+    private String formatJavaVendorDetails(JvmInstallationMetadata runtimeJdkMetaData) {
+        JvmVendor vendor = runtimeJdkMetaData.getVendor();
+        return runtimeJdkMetaData.getVendor().getKnownVendor().name() + "/" + vendor.getRawVendor();
     }
 
     /* Introspect all versions of ES that may be tested against for backwards
@@ -188,11 +188,9 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
     }
 
     private InstallationLocation getJavaInstallation(File javaHome) {
-        return javaInstallationRegistry.listInstallations()
-            .stream()
-            .filter(installationLocation -> isSameFile(javaHome, installationLocation))
+        return getAvailableJavaInstallationLocationSteam().filter(installationLocation -> isSameFile(javaHome, installationLocation))
             .findFirst()
-            .get();
+            .orElseThrow(() -> new GradleException("Could not locate available Java installation in Gradle registry at: " + javaHome));
     }
 
     private boolean isSameFile(File javaHome, InstallationLocation installationLocation) {
@@ -208,12 +206,19 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
      * To make transition more reliable we only take env var provided installations into account for now
      */
     private List<JavaHome> getAvailableJavaVersions() {
-        return javaInstallationRegistry.listInstallations().stream().map(installationLocation -> {
+        return getAvailableJavaInstallationLocationSteam().map(installationLocation -> {
             File installationDir = installationLocation.getLocation();
             JvmInstallationMetadata metadata = metadataDetector.getMetadata(installationDir);
             int actualVersion = Integer.parseInt(metadata.getLanguageVersion().getMajorVersion());
             return JavaHome.of(actualVersion, providers.provider(() -> installationDir));
         }).collect(Collectors.toList());
+    }
+
+    private Stream<InstallationLocation> getAvailableJavaInstallationLocationSteam() {
+        return Stream.concat(
+            javaInstallationRegistry.listInstallations().stream(),
+            Stream.of(new InstallationLocation(Jvm.current().getJavaHome(), "Current JVM"))
+        );
     }
 
     private static String getTestSeed() {
@@ -241,7 +246,16 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
         throw new GradleException(message);
     }
 
-    private static File findRuntimeJavaHome() {
+    private static void assertMinimumCompilerVersion(JavaVersion minimumCompilerVersion) {
+        JavaVersion currentVersion = Jvm.current().getJavaVersion();
+        if (minimumCompilerVersion.compareTo(currentVersion) > 0) {
+            throw new GradleException(
+                "Project requires Java version of " + minimumCompilerVersion + " or newer but Gradle JAVA_HOME is " + currentVersion
+            );
+        }
+    }
+
+    private File findRuntimeJavaHome() {
         String runtimeJavaProperty = System.getProperty("runtime.java");
 
         if (runtimeJavaProperty != null) {
@@ -251,8 +265,24 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
         return System.getenv("RUNTIME_JAVA_HOME") == null ? Jvm.current().getJavaHome() : new File(System.getenv("RUNTIME_JAVA_HOME"));
     }
 
-    private static String findJavaHome(String version) {
-        String versionedJavaHome = System.getenv(getJavaHomeEnvVarName(version));
+    private String findJavaHome(String version) {
+        Provider<String> javaHomeNames = providers.gradleProperty("org.gradle.java.installations.fromEnv").forUseAtConfigurationTime();
+        String javaHomeEnvVar = getJavaHomeEnvVarName(version);
+
+        // Provide a useful error if we're looking for a Java home version that we haven't told Gradle about yet
+        Arrays.stream(javaHomeNames.get().split(","))
+            .filter(s -> s.equals(javaHomeEnvVar))
+            .findFirst()
+            .orElseThrow(
+                () -> new GradleException(
+                    "Environment variable '"
+                        + javaHomeEnvVar
+                        + "' is not registered with Gradle installation supplier. Ensure 'org.gradle.java.installations.fromEnv' is "
+                        + "updated in gradle.properties file."
+                )
+            );
+
+        String versionedJavaHome = System.getenv(javaHomeEnvVar);
         if (versionedJavaHome == null) {
             final String exceptionMessage = String.format(
                 Locale.ROOT,
@@ -260,7 +290,7 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
                     + "Note that if the variable was just set you "
                     + "might have to run `./gradlew --stop` for "
                     + "it to be picked up. See https://github.com/elastic/elasticsearch/issues/31399 details.",
-                getJavaHomeEnvVarName(version)
+                javaHomeEnvVar
             );
 
             throw new GradleException(exceptionMessage);

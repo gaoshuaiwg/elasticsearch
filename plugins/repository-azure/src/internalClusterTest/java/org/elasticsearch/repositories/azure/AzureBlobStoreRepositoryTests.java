@@ -1,20 +1,9 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 package org.elasticsearch.repositories.azure;
 
@@ -34,6 +23,7 @@ import org.elasticsearch.common.regex.Regex;
 import org.elasticsearch.common.settings.MockSecureSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeUnit;
+import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.repositories.blobstore.ESMockAPIBasedRepositoryIntegTestCase;
 import org.elasticsearch.rest.RestStatus;
@@ -50,7 +40,6 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 import static org.hamcrest.Matchers.anEmptyMap;
-import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 
 @SuppressForbidden(reason = "this test uses a HttpServer to emulate an Azure endpoint")
@@ -67,6 +56,7 @@ public class AzureBlobStoreRepositoryTests extends ESMockAPIBasedRepositoryInteg
     protected Settings repositorySettings(String repoName) {
         Settings.Builder settingsBuilder = Settings.builder()
                 .put(super.repositorySettings(repoName))
+                .put(AzureRepository.Repository.MAX_SINGLE_PART_UPLOAD_SIZE_SETTING.getKey(), new ByteSizeValue(1, ByteSizeUnit.MB))
                 .put(AzureRepository.Repository.CONTAINER_SETTING.getKey(), "container")
                 .put(AzureStorageSettings.ACCOUNT_SETTING.getKey(), "test");
         if (randomBoolean()) {
@@ -92,7 +82,7 @@ public class AzureBlobStoreRepositoryTests extends ESMockAPIBasedRepositoryInteg
     }
 
     @Override
-    protected Settings nodeSettings(int nodeOrdinal) {
+    protected Settings nodeSettings(int nodeOrdinal, Settings otherSettings) {
         final String key = Base64.getEncoder().encodeToString(randomAlphaOfLength(14).getBytes(StandardCharsets.UTF_8));
         final MockSecureSettings secureSettings = new MockSecureSettings();
         String accountName = DEFAULT_ACCOUNT_NAME;
@@ -102,7 +92,7 @@ public class AzureBlobStoreRepositoryTests extends ESMockAPIBasedRepositoryInteg
         // see com.azure.storage.blob.BlobUrlParts.parseIpUrl
         final String endpoint = "ignored;DefaultEndpointsProtocol=http;BlobEndpoint=" + httpServerUrl() + "/" + accountName;
         return Settings.builder()
-            .put(super.nodeSettings(nodeOrdinal))
+            .put(super.nodeSettings(nodeOrdinal, otherSettings))
             .put(AzureStorageSettings.ENDPOINT_SUFFIX_SETTING.getConcreteSettingForNamespace("test").getKey(), endpoint)
             .setSecureSettings(secureSettings)
             .build();
@@ -124,17 +114,12 @@ public class AzureBlobStoreRepositoryTests extends ESMockAPIBasedRepositoryInteg
                 @Override
                 RequestRetryOptions getRetryOptions(LocationMode locationMode, AzureStorageSettings azureStorageSettings) {
                     return new RequestRetryOptions(RetryPolicyType.EXPONENTIAL,
-                        azureStorageSettings.getMaxRetries() + 1, 5,
-                        1L, 15L, null);
+                        azureStorageSettings.getMaxRetries() + 1, 60,
+                        50L, 100L, null);
                 }
 
                 @Override
                 long getUploadBlockSize() {
-                    return ByteSizeUnit.MB.toBytes(1);
-                }
-
-                @Override
-                long getSizeThresholdForMultiBlockUpload() {
                     return ByteSizeUnit.MB.toBytes(1);
                 }
             };
@@ -222,7 +207,6 @@ public class AzureBlobStoreRepositoryTests extends ESMockAPIBasedRepositoryInteg
         }
     }
 
-    @AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/issues/67119")
     public void testLargeBlobCountDeletion() throws Exception {
         int numberOfBlobs = randomIntBetween(257, 2000);
         try (BlobStore store = newBlobStore()) {
@@ -234,7 +218,7 @@ public class AzureBlobStoreRepositoryTests extends ESMockAPIBasedRepositoryInteg
             }
 
             container.delete();
-            assertThat(container.listBlobs().size(), equalTo(0));
+            assertThat(container.listBlobs(), is(anEmptyMap()));
         }
     }
 

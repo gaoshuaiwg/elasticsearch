@@ -1,24 +1,14 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.index.engine;
 
+import com.carrotsearch.hppc.cursors.ObjectCursor;
 import com.carrotsearch.hppc.cursors.ObjectObjectCursor;
 import com.carrotsearch.randomizedtesting.generators.RandomNumbers;
 import org.apache.logging.log4j.Level;
@@ -196,7 +186,6 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.emptyArray;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -341,7 +330,7 @@ public class InternalEngineTests extends EngineTestCase {
             engine.flush();
             final long gen1 = store.readLastCommittedSegmentsInfo().getGeneration();
             // now, optimize and wait for merges, see that we have no merge flag
-            engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+            engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
 
             for (Segment segment : engine.segments(false)) {
                 assertThat(segment.getMergeId(), nullValue());
@@ -351,7 +340,7 @@ public class InternalEngineTests extends EngineTestCase {
 
             final boolean flush = randomBoolean();
             final long gen2 = store.readLastCommittedSegmentsInfo().getGeneration();
-            engine.forceMerge(flush, 1, false, false, false, UUIDs.randomBase64UUID());
+            engine.forceMerge(flush, 1, false, UUIDs.randomBase64UUID());
             for (Segment segment : engine.segments(false)) {
                 assertThat(segment.getMergeId(), nullValue());
             }
@@ -364,7 +353,7 @@ public class InternalEngineTests extends EngineTestCase {
     }
 
     public void testSegmentsWithIndexSort() throws Exception {
-        Sort indexSort = new Sort(new SortedSetSortField("_type", false));
+        Sort indexSort = new Sort(new SortedSetSortField("field", false));
         try (Store store = createStore();
              Engine engine =
                      createEngine(defaultSettings, store, createTempDir(),
@@ -399,23 +388,33 @@ public class InternalEngineTests extends EngineTestCase {
     public void testSegmentsStatsIncludingFileSizes() throws Exception {
         try (Store store = createStore();
              Engine engine = createEngine(defaultSettings, store, createTempDir(), NoMergePolicy.INSTANCE)) {
-            assertThat(engine.segmentsStats(true, false).getFileSizes().size(), equalTo(0));
+            assertThat(engine.segmentsStats(true, false).getFiles().size(), equalTo(0));
 
             ParsedDocument doc = testParsedDocument("1", null, testDocumentWithTextField(), B_1, null);
             engine.index(indexForDoc(doc));
             engine.refresh("test");
 
-            SegmentsStats stats = engine.segmentsStats(true, false);
-            assertThat(stats.getFileSizes().size(), greaterThan(0));
-            assertThat(() -> stats.getFileSizes().valuesIt(), everyItem(greaterThan(0L)));
-
-            ObjectObjectCursor<String, Long> firstEntry = stats.getFileSizes().iterator().next();
+            final SegmentsStats stats1 = engine.segmentsStats(true, false);
+            assertThat(stats1.getFiles().size(), greaterThan(0));
+            for (ObjectObjectCursor<String, SegmentsStats.FileStats> fileStats : stats1.getFiles()) {
+                assertThat(fileStats.value.getTotal(), greaterThan(0L));
+                assertThat(fileStats.value.getCount(), greaterThan(0L));
+                assertThat(fileStats.value.getMin(), greaterThan(0L));
+                assertThat(fileStats.value.getMax(), greaterThan(0L));
+            }
 
             ParsedDocument doc2 = testParsedDocument("2", null, testDocumentWithTextField(), B_2, null);
             engine.index(indexForDoc(doc2));
             engine.refresh("test");
 
-            assertThat(engine.segmentsStats(true, false).getFileSizes().get(firstEntry.key), greaterThan(firstEntry.value));
+            final SegmentsStats stats2 = engine.segmentsStats(true, false);
+            for (ObjectCursor<String> cursor : stats1.getFiles().keys()) {
+                final String extension = cursor.value;
+                assertThat(stats2.getFiles().get(extension).getTotal(), greaterThan((stats1.getFiles().get(extension).getTotal())));
+                assertThat(stats2.getFiles().get(extension).getCount(), greaterThan((stats1.getFiles().get(extension).getCount())));
+                assertThat(stats2.getFiles().get(extension).getMin(), greaterThan((0L)));
+                assertThat(stats2.getFiles().get(extension).getMax(), greaterThan((0L)));
+            }
         }
     }
 
@@ -1363,7 +1362,7 @@ public class InternalEngineTests extends EngineTestCase {
             try (Engine.IndexCommitRef safeCommit = engine.acquireSafeIndexCommit()) {
                 safeCommitCheckpoint = Long.parseLong(safeCommit.getIndexCommit().getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY));
             }
-            engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+            engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
             assertConsistentHistoryBetweenTranslogAndLuceneIndex(engine);
             Map<Long, Translog.Operation> ops = readAllOperationsInLucene(engine)
                 .stream().collect(Collectors.toMap(Translog.Operation::seqNo, Function.identity()));
@@ -1387,7 +1386,7 @@ public class InternalEngineTests extends EngineTestCase {
             globalCheckpoint.set(localCheckpoint);
             engine.syncTranslog();
 
-            engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+            engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
             assertConsistentHistoryBetweenTranslogAndLuceneIndex(engine);
             assertThat(readAllOperationsInLucene(engine), hasSize(liveDocs.size()));
         }
@@ -1450,7 +1449,7 @@ public class InternalEngineTests extends EngineTestCase {
                     safeCommit.getIndexCommit().getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY));
                 minSeqNoToRetain = Math.min(globalCheckpoint.get() + 1 - retainedExtraOps, safeCommitLocalCheckpoint + 1);
             }
-            engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+            engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
             assertConsistentHistoryBetweenTranslogAndLuceneIndex(engine);
             Map<Long, Translog.Operation> ops = readAllOperationsInLucene(engine)
                 .stream().collect(Collectors.toMap(Translog.Operation::seqNo, Function.identity()));
@@ -1493,7 +1492,7 @@ public class InternalEngineTests extends EngineTestCase {
                 globalCheckpoint.set(engine.getPersistedLocalCheckpoint());
                 engine.syncTranslog();
             }
-            engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+            engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
             assertConsistentHistoryBetweenTranslogAndLuceneIndex(engine);
             assertThat(readAllOperationsInLucene(engine), hasSize(liveDocsWithSource.size()));
         }
@@ -1529,8 +1528,7 @@ public class InternalEngineTests extends EngineTestCase {
                                 engine.refresh("test");
                                 indexed.countDown();
                                 try {
-                                    engine.forceMerge(
-                                        randomBoolean(), 1, false, randomBoolean(), randomBoolean(), UUIDs.randomBase64UUID());
+                                    engine.forceMerge(randomBoolean(), 1, false, UUIDs.randomBase64UUID());
                                 } catch (IOException e) {
                                     return;
                                 }
@@ -1547,7 +1545,7 @@ public class InternalEngineTests extends EngineTestCase {
                 startGun.countDown();
                 int someIters = randomIntBetween(1, 10);
                 for (int i = 0; i < someIters; i++) {
-                    engine.forceMerge(randomBoolean(), 1, false, randomBoolean(), randomBoolean(), UUIDs.randomBase64UUID());
+                    engine.forceMerge(randomBoolean(), 1, false, UUIDs.randomBase64UUID());
                 }
                 indexed.await();
                 IOUtils.close(engine);
@@ -2924,7 +2922,7 @@ public class InternalEngineTests extends EngineTestCase {
                     try {
                         switch (operation) {
                             case "optimize": {
-                                engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+                                engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
                                 break;
                             }
                             case "refresh": {
@@ -4170,7 +4168,7 @@ public class InternalEngineTests extends EngineTestCase {
                 boolean onlyExpungeDeletes = randomBoolean();
                 int maxNumSegments = randomIntBetween(-1, 10);
                 try {
-                    engine.forceMerge(flush, maxNumSegments, onlyExpungeDeletes, false, false, UUIDs.randomBase64UUID());
+                    engine.forceMerge(flush, maxNumSegments, onlyExpungeDeletes, UUIDs.randomBase64UUID());
                 } catch (IllegalArgumentException e) {
                     assertThat(e.getMessage(), containsString("only_expunge_deletes and max_num_segments are mutually exclusive"));
                     assertThat(onlyExpungeDeletes, is(true));
@@ -4867,7 +4865,7 @@ public class InternalEngineTests extends EngineTestCase {
         engine.index(indexForDoc(doc));
         assertThat(engine.getTranslog().stats().getUncommittedOperations(), equalTo(2));
         engine.refresh("test");
-        engine.forceMerge(false, 1, false, false, false, UUIDs.randomBase64UUID());
+        engine.forceMerge(false, 1, false, UUIDs.randomBase64UUID());
         assertBusy(() -> {
             // the merge listner runs concurrently after the force merge returned
             assertThat(engine.shouldPeriodicallyFlush(), equalTo(true));
@@ -5111,7 +5109,7 @@ public class InternalEngineTests extends EngineTestCase {
                     engine.flush();
                 }
                 if (rarely()) {
-                    engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+                    engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
                 }
             }
             List<Translog.Operation> actualOps = readAllOperationsInLucene(engine);
@@ -5189,7 +5187,7 @@ public class InternalEngineTests extends EngineTestCase {
                     equalTo(engine.getMinRetainedSeqNo()));
             }
             if (rarely()) {
-                engine.forceMerge(randomBoolean(), 1, false, false, false, UUIDs.randomBase64UUID());
+                engine.forceMerge(randomBoolean(), 1, false, UUIDs.randomBase64UUID());
             }
             try (Closeable ignored = engine.acquireHistoryRetentionLock()) {
                 long minRetainSeqNos = engine.getMinRetainedSeqNo();
@@ -5281,7 +5279,7 @@ public class InternalEngineTests extends EngineTestCase {
                     @Override
                     protected void doRun() throws Exception {
                         latch.await();
-                        Translog.Snapshot changes = engine.newChangesSnapshot("test", min, max, true);
+                        Translog.Snapshot changes = engine.newChangesSnapshot("test", min, max, true, randomBoolean());
                         changes.close();
                     }
                 });
@@ -5506,7 +5504,7 @@ public class InternalEngineTests extends EngineTestCase {
                 assertThat(softDeletesEngine.getVersionMap().keySet(), empty());
                 softDeletesEngine.recoverFromTranslog(translogHandler, Long.MAX_VALUE);
                 if (randomBoolean()) {
-                    engine.forceMerge(randomBoolean(), 1, false, false, false, UUIDs.randomBase64UUID());
+                    engine.forceMerge(randomBoolean(), 1, false, UUIDs.randomBase64UUID());
                 }
                 assertThat(getDocIds(softDeletesEngine, true), equalTo(docs));
                 assertConsistentHistoryBetweenTranslogAndLuceneIndex(softDeletesEngine);
@@ -5636,7 +5634,7 @@ public class InternalEngineTests extends EngineTestCase {
             for (int i = 0; i < numDocs; i++) {
                 index(engine, i);
             }
-            engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+            engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
             engine.delete(new Engine.Delete("0", newUid("0"), primaryTerm.get()));
             engine.refresh("test");
             // now we have 2 segments since we now added a tombstone plus the old segment with the delete
@@ -5655,7 +5653,7 @@ public class InternalEngineTests extends EngineTestCase {
             }
 
             // lets force merge the tombstone and the original segment and make sure the doc is still there but the ID term is gone
-            engine.forceMerge(true, 1, false, false, false, UUIDs.randomBase64UUID());
+            engine.forceMerge(true, 1, false, UUIDs.randomBase64UUID());
             engine.refresh("test");
             try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
                 IndexReader reader = searcher.getIndexReader();
@@ -5699,7 +5697,7 @@ public class InternalEngineTests extends EngineTestCase {
                         engine.flush();
                     }
                     if (randomInt(100) < 5) {
-                        engine.forceMerge(randomBoolean(), 1, false, false, false, UUIDs.randomBase64UUID());
+                        engine.forceMerge(randomBoolean(), 1, false, UUIDs.randomBase64UUID());
                     }
                 }
                 if (randomBoolean()) {
